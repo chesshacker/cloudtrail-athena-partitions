@@ -30,7 +30,7 @@ func main() {
 	checkError(err)
 	err = processor.findOrg()
 	checkError(err)
-	err = processor.findAccounts()
+	err = processor.processAccounts()
 	checkError(err)
 }
 
@@ -76,13 +76,28 @@ func (p *bucketProcessor) findOrg() error {
 	return nil
 }
 
-func (p *bucketProcessor) findAccounts() error {
+func (p *bucketProcessor) processAccounts() error {
 	accounts, err := p.listFromBucket(p.prefix)
 	if err != nil {
 		return err
 	}
 	for _, account := range accounts {
-		fmt.Println(p.prefix + account)
+		err := p.processRegion(account)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *bucketProcessor) processRegion(account string) error {
+	regionPrefix := p.prefix + account + "CloudTrail/"
+	regions, err := p.listFromBucket(regionPrefix)
+	if err != nil {
+		return err
+	}
+	for _, region := range regions {
+		fmt.Println(regionPrefix + region)
 	}
 	return nil
 }
