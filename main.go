@@ -67,7 +67,7 @@ func (p *bucketProcessor) findOrg() error {
 	for _, id := range ids {
 		if id[0:2] == "o-" {
 			foundId = true
-			p.prefix += id
+			p.prefix += id + "/"
 		}
 	}
 	if !foundId {
@@ -91,13 +91,43 @@ func (p *bucketProcessor) processAccounts() error {
 }
 
 func (p *bucketProcessor) processRegion(account string) error {
-	regionPrefix := p.prefix + account + "CloudTrail/"
-	regions, err := p.listFromBucket(regionPrefix)
+	prefix := p.prefix + account + "/CloudTrail/"
+	regions, err := p.listFromBucket(prefix)
 	if err != nil {
 		return err
 	}
 	for _, region := range regions {
-		fmt.Println(regionPrefix + region)
+		err = p.processYear(account, region)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *bucketProcessor) processYear(account, region string) error {
+	prefix := p.prefix + account + "/CloudTrail/" + region + "/"
+	years, err := p.listFromBucket(prefix)
+	if err != nil {
+		return err
+	}
+	for _, year := range years {
+		err = p.processMonth(account, region, year)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *bucketProcessor) processMonth(account, region, year string) error {
+	prefix := p.prefix + account + "/CloudTrail/" + region + "/" + year + "/"
+	months, err := p.listFromBucket(prefix)
+	if err != nil {
+		return err
+	}
+	for _, month := range months {
+		fmt.Println("PARTITION (account='" + account + "', region='" + region + "', year='" + year + "', month='" + month + "') LOCATION 's3://" + p.bucket + "/" + p.prefix + account + "/CloudTrail/" + region + "/" + year + "/" + month + "';")
 	}
 	return nil
 }
@@ -112,7 +142,8 @@ func (p *bucketProcessor) listFromBucket(prefix string) ([]string, error) {
 	}, func(page *s3.ListObjectsOutput, _ bool) bool {
 		for _, p := range page.CommonPrefixes {
 			withoutPrefix := strings.Replace(*p.Prefix, prefix, "", 1)
-			result = append(result, withoutPrefix)
+			withoutSlash := withoutPrefix[0 : len(withoutPrefix)-1]
+			result = append(result, withoutSlash)
 		}
 		return true
 	})
