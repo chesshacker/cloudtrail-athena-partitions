@@ -20,7 +20,7 @@ type bucketProcessor struct {
 	svc    *s3.S3
 	bucket string
 	prefix string
-	org    string
+	sql    string
 }
 
 func main() {
@@ -32,6 +32,7 @@ func main() {
 	checkError(err)
 	err = processor.processAccounts()
 	checkError(err)
+	fmt.Println(processor.sql)
 }
 
 func getProgramInputs() (*programInputs, error) {
@@ -55,6 +56,7 @@ func newBucketProcessor(inputs *programInputs) (*bucketProcessor, error) {
 		return nil, err
 	}
 	result.svc = s3.New(sess)
+	result.sql = "ALTER TABLE cloudtrail_logs ADD IF NOT EXISTS"
 	return &result, nil
 }
 
@@ -127,7 +129,7 @@ func (p *bucketProcessor) processMonth(account, region, year string) error {
 		return err
 	}
 	for _, month := range months {
-		fmt.Println("PARTITION (account='" + account + "', region='" + region + "', year='" + year + "', month='" + month + "') LOCATION 's3://" + p.bucket + "/" + p.prefix + account + "/CloudTrail/" + region + "/" + year + "/" + month + "';")
+		p.sql += "\nPARTITION (account='" + account + "', region='" + region + "', year='" + year + "', month='" + month + "') LOCATION 's3://" + p.bucket + "/" + p.prefix + account + "/CloudTrail/" + region + "/" + year + "/" + month + "'"
 	}
 	return nil
 }
