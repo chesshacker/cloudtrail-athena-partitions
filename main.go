@@ -9,38 +9,45 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/athena"
 	"github.com/aws/aws-sdk-go/service/s3"
 )
 
 type programInputs struct {
-	bucket string
+	cloudtrail     string
+	athena_results string
 }
 
-type bucketProcessor struct {
-	svc    *s3.S3
-	bucket string
-	prefix string
-	sql    string
+type processor struct {
+	svc            *s3.S3
+	ath            *athena.Athena
+	cloudtrail     string
+	athena_results string
+	prefix         string
+	sql            string
 }
 
 func main() {
 	inputs, err := getProgramInputs()
 	checkError(err)
-	processor, err := newBucketProcessor(inputs)
+	processor, err := newProcessor(inputs)
 	checkError(err)
 	err = processor.findOrg()
 	checkError(err)
 	err = processor.processAccounts()
 	checkError(err)
-	processor.createAthenaTable()
+	err = processor.applySql()
+	checkError(err)
+	fmt.Print("Partitions processed:")
 	fmt.Println(processor.sql)
 }
 
 func getProgramInputs() (*programInputs, error) {
 	var result programInputs
-	flag.StringVar(&result.bucket, "bucket", "", "AWS bucket name")
+	flag.StringVar(&result.cloudtrail, "cloudtrail", "", "AWS bucket name for cloudtrail logs")
+	flag.StringVar(&result.athena_results, "athena-results", "", "AWS bucket name to store athena results")
 	flag.Parse()
-	if result.bucket == "" {
+	if result.cloudtrail == "" {
 		return nil, errors.New("bucket is a required parameter")
 	}
 	return &result, nil
@@ -48,20 +55,21 @@ func getProgramInputs() (*programInputs, error) {
 
 // bucket_name/prefix_name/AWSLogs/OU-ID/Account-ID/CloudTrail/region/YYYY/MM/DD/file_name.json.gz
 
-func newBucketProcessor(inputs *programInputs) (*bucketProcessor, error) {
-	var result bucketProcessor
-	result.bucket = inputs.bucket
+func newProcessor(inputs *programInputs) (*processor, error) {
+	var result processor
+	result.cloudtrail = inputs.cloudtrail
+	result.athena_results = inputs.athena_results
 	result.prefix = "AWSLogs/"
 	sess, err := session.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	result.svc = s3.New(sess)
-	result.sql = "ALTER TABLE cloudtrail_logs ADD IF NOT EXISTS"
+	result.ath = athena.New(sess)
 	return &result, nil
 }
 
-func (p *bucketProcessor) findOrg() error {
+func (p *processor) findOrg() error {
 	foundId := false
 	ids, err := p.listFromBucket(p.prefix)
 	if err != nil {
@@ -79,7 +87,7 @@ func (p *bucketProcessor) findOrg() error {
 	return nil
 }
 
-func (p *bucketProcessor) processAccounts() error {
+func (p *processor) processAccounts() error {
 	accounts, err := p.listFromBucket(p.prefix)
 	if err != nil {
 		return err
@@ -93,7 +101,7 @@ func (p *bucketProcessor) processAccounts() error {
 	return nil
 }
 
-func (p *bucketProcessor) processRegion(account string) error {
+func (p *processor) processRegion(account string) error {
 	prefix := p.prefix + account + "/CloudTrail/"
 	regions, err := p.listFromBucket(prefix)
 	if err != nil {
@@ -108,7 +116,7 @@ func (p *bucketProcessor) processRegion(account string) error {
 	return nil
 }
 
-func (p *bucketProcessor) processYear(account, region string) error {
+func (p *processor) processYear(account, region string) error {
 	prefix := p.prefix + account + "/CloudTrail/" + region + "/"
 	years, err := p.listFromBucket(prefix)
 	if err != nil {
@@ -123,22 +131,23 @@ func (p *bucketProcessor) processYear(account, region string) error {
 	return nil
 }
 
-func (p *bucketProcessor) processMonth(account, region, year string) error {
+func (p *processor) processMonth(account, region, year string) error {
 	prefix := p.prefix + account + "/CloudTrail/" + region + "/" + year + "/"
 	months, err := p.listFromBucket(prefix)
 	if err != nil {
 		return err
 	}
 	for _, month := range months {
-		p.sql += "\nPARTITION (account='" + account + "', region='" + region + "', year='" + year + "', month='" + month + "') LOCATION 's3://" + p.bucket + "/" + p.prefix + account + "/CloudTrail/" + region + "/" + year + "/" + month + "'"
+		p.sql += fmt.Sprintf("\nPARTITION (account='%s', region='%s', year='%s', month='%s') LOCATION 's3://%s/%s/%s'",
+			account, region, year, month, p.cloudtrail, prefix, month)
 	}
 	return nil
 }
 
-func (p *bucketProcessor) listFromBucket(prefix string) ([]string, error) {
+func (p *processor) listFromBucket(prefix string) ([]string, error) {
 	var result []string
 	err := p.svc.ListObjectsPages(&s3.ListObjectsInput{
-		Bucket:    &p.bucket,
+		Bucket:    &p.cloudtrail,
 		Delimiter: aws.String("/"),
 		MaxKeys:   aws.Int64(50),
 		Prefix:    &prefix,
@@ -153,17 +162,32 @@ func (p *bucketProcessor) listFromBucket(prefix string) ([]string, error) {
 	return result, err
 }
 
-func checkError(err error) {
+func (p *processor) applySql() error {
+	sql := p.createTableSql()
+	_, err := p.ath.StartQueryExecution(p.getStartQueryExecutionInput(sql))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return err
+	}
+	sql = "ALTER TABLE cloudtrail_logs ADD IF NOT EXISTS\n" + p.sql
+	_, err = p.ath.StartQueryExecution(p.getStartQueryExecutionInput(sql))
+	return err
+}
+
+func (p *processor) getStartQueryExecutionInput(sql string) *athena.StartQueryExecutionInput {
+	return &athena.StartQueryExecutionInput{
+		QueryString: aws.String(sql),
+		QueryExecutionContext: &athena.QueryExecutionContext{
+			Database: aws.String("Default"),
+		},
+		ResultConfiguration: &athena.ResultConfiguration{
+			OutputLocation: aws.String("s3://" + p.athena_results),
+		},
 	}
 }
 
-func (p *bucketProcessor) createAthenaTable() {
-	// TODO: actually create the table and return any errors
-	fmt.Printf(`
-CREATE EXTERNAL TABLE cloudtrail_logs (
+func (p *processor) createTableSql() string {
+	return fmt.Sprintf(`
+CREATE EXTERNAL TABLE IF NOT EXISTS cloudtrail_logs (
 	eventversion STRING,
 	useridentity STRUCT<
 		type:STRING,
@@ -213,5 +237,12 @@ ROW FORMAT SERDE 'com.amazon.emr.hive.serde.CloudTrailSerde'
 STORED AS INPUTFORMAT 'com.amazon.emr.cloudtrail.CloudTrailInputFormat'
 OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
 LOCATION 's3://%s/%s';
-`, p.bucket, p.prefix)
+`, p.cloudtrail, p.prefix)
+}
+
+func checkError(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
