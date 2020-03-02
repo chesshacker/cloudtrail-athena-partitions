@@ -16,6 +16,8 @@ import (
 type programInputs struct {
 	cloudtrail     string
 	athena_results string
+	year           string
+	month          string
 }
 
 type processor struct {
@@ -23,6 +25,8 @@ type processor struct {
 	ath            *athena.Athena
 	cloudtrail     string
 	athena_results string
+	year           string
+	month          string
 	prefix         string
 	sql            string
 }
@@ -45,11 +49,18 @@ func main() {
 func getProgramInputs() (*programInputs, error) {
 	var result programInputs
 	flag.StringVar(&result.cloudtrail, "cloudtrail", "", "AWS bucket name for cloudtrail logs")
-	flag.StringVar(&result.athena_results, "athena-results", "", "AWS bucket name to store athena results")
+	flag.StringVar(&result.athena_results, "athena-results", "", "AWS bucket name/path to store athena results")
+	flag.StringVar(&result.year, "year", "", "year to partition")
+	flag.StringVar(&result.month, "month", "", "month to partition")
 	flag.Parse()
 	if result.cloudtrail == "" {
 		return nil, errors.New("bucket is a required parameter")
 	}
+	if result.athena_results == "" {
+		return nil, errors.New("athena-results is a required parameter")
+	}
+	// year and month are optional
+	// TODO: add current-month flag
 	return &result, nil
 }
 
@@ -108,7 +119,11 @@ func (p *processor) processRegion(account string) error {
 		return err
 	}
 	for _, region := range regions {
-		err = p.processYear(account, region)
+		if p.year == "" {
+			err = p.processYear(account, region)
+		} else {
+			err = p.processMonth(account, region, p.year)
+		}
 		if err != nil {
 			return err
 		}
@@ -133,7 +148,14 @@ func (p *processor) processYear(account, region string) error {
 
 func (p *processor) processMonth(account, region, year string) error {
 	prefix := p.prefix + account + "/CloudTrail/" + region + "/" + year + "/"
-	months, err := p.listFromBucket(prefix)
+	var months []string
+	var err error
+	if p.month == "" {
+		months, err = p.listFromBucket(prefix)
+	} else {
+		months = []string{p.month}
+	}
+
 	if err != nil {
 		return err
 	}

@@ -8,5 +8,5 @@ ortizaggies-org-cloudtrail, and I have a different bucket to store athena query
 results, called ortizaggies-org-athena-results. I would run:
 
 ```
-go run . --cloudtrail ortizaggies-org-cloudtrail --athena-results ortizaggies-org-athena-results
+go run . --cloudtrail ortizaggies-org-cloudtrail --athena-results ortizaggies-org-athena-results --year 2020 --month 03
 ```
