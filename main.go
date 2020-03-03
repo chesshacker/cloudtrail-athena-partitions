@@ -28,8 +28,10 @@ type processor struct {
 	year           string
 	month          string
 	prefix         string
-	sql            string
+	sql            []string
 }
+
+const MAX_SQL_LENGTH = 262144
 
 func main() {
 	inputs, err := getProgramInputs()
@@ -160,8 +162,9 @@ func (p *processor) processMonth(account, region, year string) error {
 		return err
 	}
 	for _, month := range months {
-		p.sql += fmt.Sprintf("\nPARTITION (account='%s', region='%s', year='%s', month='%s') LOCATION 's3://%s/%s/%s'",
+		newStatement := fmt.Sprintf(" PARTITION (account='%s', region='%s', year='%s', month='%s') LOCATION 's3://%s/%s/%s'",
 			account, region, year, month, p.cloudtrail, prefix, month)
+		p.sql = append(p.sql, newStatement)
 	}
 	return nil
 }
@@ -190,8 +193,25 @@ func (p *processor) applySql() error {
 	if err != nil {
 		return err
 	}
-	sql = "ALTER TABLE cloudtrail_logs ADD IF NOT EXISTS\n" + p.sql
-	_, err = p.ath.StartQueryExecution(p.getStartQueryExecutionInput(sql))
+	var sb strings.Builder
+	sb.Grow(MAX_SQL_LENGTH)
+	sb.WriteString("ALTER TABLE cloudtrail_logs ADD IF NOT EXISTS")
+	charsRemaining := MAX_SQL_LENGTH - 45
+	for _, stmt := range p.sql {
+		stmtLen := len(stmt)
+		if charsRemaining < stmtLen {
+			_, err = p.ath.StartQueryExecution(p.getStartQueryExecutionInput(sb.String()))
+			if err != nil {
+				return err
+			}
+			sb.Reset()
+			sb.WriteString("ALTER TABLE cloudtrail_logs ADD IF NOT EXISTS")
+			charsRemaining = MAX_SQL_LENGTH - 45
+		}
+		charsRemaining -= stmtLen
+		sb.WriteString(stmt)
+	}
+	_, err = p.ath.StartQueryExecution(p.getStartQueryExecutionInput(sb.String()))
 	return err
 }
 
