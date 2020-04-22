@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -18,6 +19,7 @@ type programInputs struct {
 	athena_results string
 	year           string
 	month          string
+	current_month  bool
 }
 
 type processor struct {
@@ -44,8 +46,7 @@ func main() {
 	checkError(err)
 	err = processor.applySql()
 	checkError(err)
-	fmt.Print("Partitions processed:")
-	fmt.Println(processor.sql)
+	fmt.Printf("%d partitions processed\n", len(processor.sql))
 }
 
 func getProgramInputs() (*programInputs, error) {
@@ -54,6 +55,7 @@ func getProgramInputs() (*programInputs, error) {
 	flag.StringVar(&result.athena_results, "athena-results", "", "AWS bucket name/path to store athena results")
 	flag.StringVar(&result.year, "year", "", "year to partition")
 	flag.StringVar(&result.month, "month", "", "month to partition")
+	flag.BoolVar(&result.current_month, "current-month", false, "set to True to use the current month")
 	flag.Parse()
 	if result.cloudtrail == "" {
 		return nil, errors.New("bucket is a required parameter")
@@ -61,8 +63,9 @@ func getProgramInputs() (*programInputs, error) {
 	if result.athena_results == "" {
 		return nil, errors.New("athena-results is a required parameter")
 	}
-	// year and month are optional
-	// TODO: add current-month flag
+	if result.current_month && (result.year != "" || result.month != "") {
+		return nil, errors.New("current-month cannot be true when passing year or month")
+	}
 	return &result, nil
 }
 
@@ -72,6 +75,13 @@ func newProcessor(inputs *programInputs) (*processor, error) {
 	var result processor
 	result.cloudtrail = inputs.cloudtrail
 	result.athena_results = inputs.athena_results
+	result.year = inputs.year
+	result.month = inputs.month
+	if inputs.current_month {
+		currentTime := time.Now()
+		result.year = currentTime.Format("2006")
+		result.month = currentTime.Format("01")
+	}
 	result.prefix = "AWSLogs/"
 	sess, err := session.NewSession()
 	if err != nil {
@@ -106,7 +116,7 @@ func (p *processor) processAccounts() error {
 		return err
 	}
 	for _, account := range accounts {
-		err := p.processRegion(account)
+		err := p.processRegions(account)
 		if err != nil {
 			return err
 		}
@@ -114,7 +124,7 @@ func (p *processor) processAccounts() error {
 	return nil
 }
 
-func (p *processor) processRegion(account string) error {
+func (p *processor) processRegions(account string) error {
 	prefix := p.prefix + account + "/CloudTrail/"
 	regions, err := p.listFromBucket(prefix)
 	if err != nil {
@@ -122,9 +132,9 @@ func (p *processor) processRegion(account string) error {
 	}
 	for _, region := range regions {
 		if p.year == "" {
-			err = p.processYear(account, region)
+			err = p.processYears(account, region)
 		} else {
-			err = p.processMonth(account, region, p.year)
+			err = p.processMonths(account, region, p.year)
 		}
 		if err != nil {
 			return err
@@ -133,14 +143,14 @@ func (p *processor) processRegion(account string) error {
 	return nil
 }
 
-func (p *processor) processYear(account, region string) error {
+func (p *processor) processYears(account, region string) error {
 	prefix := p.prefix + account + "/CloudTrail/" + region + "/"
 	years, err := p.listFromBucket(prefix)
 	if err != nil {
 		return err
 	}
 	for _, year := range years {
-		err = p.processMonth(account, region, year)
+		err = p.processMonths(account, region, year)
 		if err != nil {
 			return err
 		}
@@ -148,7 +158,7 @@ func (p *processor) processYear(account, region string) error {
 	return nil
 }
 
-func (p *processor) processMonth(account, region, year string) error {
+func (p *processor) processMonths(account, region, year string) error {
 	prefix := p.prefix + account + "/CloudTrail/" + region + "/" + year + "/"
 	var months []string
 	var err error
